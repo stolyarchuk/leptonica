@@ -744,6 +744,12 @@ pixConvertRGBToLuminance(PIX *pixs)
   return pixConvertRGBToGray(pixs, 0.0, 0.0, 0.0);
 }
 
+PIX *
+pixConvertRGBToLuminanceOmp(PIX *pixs)
+{
+  return pixConvertRGBToGrayOmp(pixs, 0.0, 0.0, 0.0);
+}
+
 
 /*!
  * \brief   pixConvertRGBToGrayGeneral()
@@ -869,6 +875,68 @@ PIX       *pixd;
     datad = pixGetData(pixd);
     wpld = pixGetWpl(pixd);
 
+    for (i = 0; i < h; i++) {
+        lines = datas + i * wpls;
+        lined = datad + i * wpld;
+        for (j = 0; j < w; j++) {
+            word = *(lines + j);
+            val = (l_int32)(rwt * ((word >> L_RED_SHIFT) & 0xff) +
+                            gwt * ((word >> L_GREEN_SHIFT) & 0xff) +
+                            bwt * ((word >> L_BLUE_SHIFT) & 0xff) + 0.5);
+            SET_DATA_BYTE(lined, j, val);
+        }
+    }
+
+    return pixd;
+}
+
+PIX *
+pixConvertRGBToGrayOmp(PIX       *pixs,
+                    l_float32  rwt,
+                    l_float32  gwt,
+                    l_float32  bwt)
+{
+l_int32    i, j, w, h, wpls, wpld, val;
+l_uint32   word;
+l_uint32  *datas, *lines, *datad, *lined;
+l_float32  sum;
+PIX       *pixd;
+
+    PROCNAME("pixConvertRGBToGrayOmp");
+
+    if (!pixs)
+        return (PIX *)ERROR_PTR("pixs not defined", procName, NULL);
+    if (pixGetDepth(pixs) != 32)
+        return (PIX *)ERROR_PTR("pixs not 32 bpp", procName, NULL);
+    if (rwt < 0.0 || gwt < 0.0 || bwt < 0.0)
+        return (PIX *)ERROR_PTR("weights not all >= 0.0", procName, NULL);
+
+        /* Make sure the sum of weights is 1.0; otherwise, you can get
+         * overflow in the gray value. */
+    if (rwt == 0.0 && gwt == 0.0 && bwt == 0.0) {
+        rwt = L_RED_WEIGHT;
+        gwt = L_GREEN_WEIGHT;
+        bwt = L_BLUE_WEIGHT;
+    }
+    sum = rwt + gwt + bwt;
+    if (L_ABS(sum - 1.0) > 0.0001) {  /* maintain ratios with sum == 1.0 */
+        L_WARNING("weights don't sum to 1; maintaining ratios\n", procName);
+        rwt = rwt / sum;
+        gwt = gwt / sum;
+        bwt = bwt / sum;
+    }
+
+    pixGetDimensions(pixs, &w, &h, NULL);
+    datas = pixGetData(pixs);
+    wpls = pixGetWpl(pixs);
+    if ((pixd = pixCreate(w, h, 8)) == NULL)
+        return (PIX *)ERROR_PTR("pixd not made", procName, NULL);
+    pixCopyResolution(pixd, pixs);
+    pixCopyInputFormat(pixd, pixs);
+    datad = pixGetData(pixd);
+    wpld = pixGetWpl(pixd);
+
+#pragma omp parallel for
     for (i = 0; i < h; i++) {
         lines = datas + i * wpls;
         lined = datad + i * wpld;
@@ -3185,6 +3253,61 @@ PIXCMAP  *cmap;
     }
 }
 
+PIX *
+pixConvertTo8Omp(PIX     *pixs,
+              l_int32  cmapflag)
+{
+l_int32   d;
+PIX      *pix1, *pixd;
+PIXCMAP  *cmap;
+
+    PROCNAME("pixConvertTo8Omp");
+    if (!pixs)
+        return (PIX *)ERROR_PTR("pixs not defined", procName, NULL);
+    d = pixGetDepth(pixs);
+    if (d != 1 && d != 2 && d != 4 && d != 8 && d != 16 && d != 24 && d != 32)
+        return (PIX *)ERROR_PTR("depth not {1,2,4,8,16,24,32}", procName, NULL);
+
+    if (d == 1) {
+        if (cmapflag)
+            return pixConvert1To8Cmap(pixs);
+        else
+            return pixConvert1To8(NULL, pixs, 255, 0);
+    } else if (d == 2) {
+        return pixConvert2To8(pixs, 0, 85, 170, 255, cmapflag);
+    } else if (d == 4) {
+        return pixConvert4To8(pixs, cmapflag);
+    } else if (d == 8) {
+        cmap = pixGetColormap(pixs);
+        if ((cmap && cmapflag) || (!cmap && !cmapflag)) {
+            return pixCopy(NULL, pixs);
+        } else if (cmap) {  /* !cmapflag */
+            return pixRemoveColormap(pixs, REMOVE_CMAP_TO_GRAYSCALE);
+        } else {  /* !cmap && cmapflag; add colormap to pixd */
+            pixd = pixCopy(NULL, pixs);
+            pixAddGrayColormap8(pixd);
+            return pixd;
+        }
+    } else if (d == 16) {
+        pixd = pixConvert16To8(pixs, L_MS_BYTE);
+        if (cmapflag)
+            pixAddGrayColormap8(pixd);
+        return pixd;
+    } else if (d == 24) {
+        pix1 = pixConvert24To32Omp(pixs);
+        pixd = pixConvertRGBToLuminanceOmp(pix1);
+        if (cmapflag)
+            pixAddGrayColormap8(pixd);
+        pixDestroy(&pix1);
+        return pixd;
+    } else { /* d == 32 */
+        pixd = pixConvertRGBToLuminanceOmp(pixs);
+        if (cmapflag)
+            pixAddGrayColormap8(pixd);
+        return pixd;
+    }
+}
+
 
 /*!
  * \brief   pixConvertTo8BySampling()
@@ -3573,6 +3696,45 @@ PIX       *pixd;
     datad = pixGetData(pixd);
     wpls = pixGetWpl(pixs);
     wpld = pixGetWpl(pixd);
+    for (i = 0; i < h; i++) {
+        lines = (l_uint8 *)(datas + i * wpls);
+        lined = datad + i * wpld;
+        for (j = 0; j < w; j++) {
+            rval = *lines++;
+            gval = *lines++;
+            bval = *lines++;
+            composeRGBPixel(rval, gval, bval, &pixel);
+            lined[j] = pixel;
+        }
+    }
+    pixCopyResolution(pixd, pixs);
+    pixCopyInputFormat(pixd, pixs);
+    return pixd;
+}
+
+PIX *
+pixConvert24To32Omp(PIX  *pixs)
+{
+l_uint8   *lines;
+l_int32    w, h, d, i, j, wpls, wpld, rval, gval, bval;
+l_uint32   pixel;
+l_uint32  *datas, *datad, *lined;
+PIX       *pixd;
+
+    PROCNAME("pixConvert24to32");
+
+    if (!pixs)
+        return (PIX *)ERROR_PTR("pixs not defined", procName, NULL);
+    pixGetDimensions(pixs, &w, &h, &d);
+    if (d != 24)
+        return (PIX *)ERROR_PTR("pixs not 24 bpp", procName, NULL);
+
+    pixd = pixCreate(w, h, 32);
+    datas = pixGetData(pixs);
+    datad = pixGetData(pixd);
+    wpls = pixGetWpl(pixs);
+    wpld = pixGetWpl(pixd);
+#pragma omp parallel for
     for (i = 0; i < h; i++) {
         lines = (l_uint8 *)(datas + i * wpls);
         lined = datad + i * wpld;
