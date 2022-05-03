@@ -16,6 +16,9 @@ endif()
 
 string(REPLACE "-O3" "-O2" CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE}")
 
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native -mavx2 -msse2 -fopenmp-simd -fopenmp -ffast-math")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=native -mavx2 -msse2 -fopenmp-simd -fopenmp -ffast-math")
+
 add_library                     (leptonica ${src} ${hdr})
 set_target_properties           (leptonica PROPERTIES VERSION   5.4.0)
 set_target_properties           (leptonica PROPERTIES SOVERSION 5)
